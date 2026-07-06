@@ -227,6 +227,9 @@ class MainActivity : AppCompatActivity(), MainView, OnRefreshListener, ThemeProv
                     DirectoryInitialization.MigrationResult.NOT_ENOUGH_SPACE -> {
                         Toast.makeText(this, R.string.migrate_user_data_failed_space, Toast.LENGTH_LONG).show()
                     }
+                    DirectoryInitialization.MigrationResult.SD_CARD_UNAVAILABLE -> {
+                        Toast.makeText(this, R.string.migrate_user_data_failed_sdcard, Toast.LENGTH_LONG).show()
+                    }
                     DirectoryInitialization.MigrationResult.FAILED -> {
                         Toast.makeText(this, R.string.migrate_user_data_failed, Toast.LENGTH_LONG).show()
                     }
