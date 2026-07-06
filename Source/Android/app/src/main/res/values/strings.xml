@@ -70,6 +70,31 @@
 
     <!-- General Preference Fragment -->
     <string name="general_submenu">General</string>
+    <string name="user_data_storage">User Data Storage Location</string>
+    <string name="user_data_storage_description">Where Dolphin stores saves, settings, and other user data. Internal/SD Card requires restarting Dolphin to take effect. On Android 11+, \"All files access\" permission must be granted.</string>
+    <string name="storage_restart_title">Restart Required</string>
+    <string name="storage_restart_message">Dolphin needs to restart to apply the new storage location.</string>
+    <string name="storage_restart_button">Restart Now</string>
+    <string name="storage_permission_title">All Files Access Required</string>
+    <string name="storage_permission_needed">You have selected Internal Storage or SD Card for user data. Android 11 and above requires the \"All files access\" permission to write to this location. Dolphin will use Scoped Storage until the permission is granted.</string>
+    <string name="storage_permission_grant">Grant Permission</string>
+    <string name="storage_permission_use_scoped">Use Scoped Storage</string>
+    <string name="migrate_user_data_title">Copy Existing User Data?</string>
+    <string name="migrate_user_data_message">Dolphin found existing user data in your previous storage location. Would you like to copy it to the new location? Files will be deleted from the old location once they are verified. This may take a moment.</string>
+    <string name="migrate_user_data_yes">Copy</string>
+    <string name="migrate_user_data_no">No Thanks</string>
+    <string name="migrate_user_data_in_progress">Copying User Data…</string>
+    <string name="migrate_user_data_progress">Preparing…</string>
+    <string name="migrate_user_data_progress_file">File %1$d of %2$d</string>
+    <string name="migrate_conflict_title">Files Already Exist</string>
+    <string name="migrate_conflict_message">The dolphin-emu folder at the new location already contains data. Replacing will delete all existing files there, then copy your files from the previous location. This cannot be undone.</string>
+    <string name="migrate_conflict_replace">Replace</string>
+    <string name="migrate_conflict_keep">Keep Existing</string>
+    <string name="migrate_user_data_success_title">Migration Complete</string>
+    <string name="migrate_user_data_success_message">Your data has been copied and verified. Dolphin needs to restart to load your settings from the new location.</string>
+    <string name="migrate_user_data_failed">Migration failed or verification failed. Files have been kept in the original location.</string>
+    <string name="migrate_user_data_failed_space">Not enough free space at the destination to copy your data. Free up space and try again. Files have been kept in the original location.</string>
+    <string name="migrate_user_data_failed_sdcard">SD card is not available. Reconnect it and try again. Files have been kept in the original location.</string>
     <string name="dual_core">Dual Core (speedhack)</string>
     <string name="dual_core_description">Split workload to two CPU cores instead of one. Increases speed.</string>
     <string name="enable_cheats">Enable Cheats</string>
