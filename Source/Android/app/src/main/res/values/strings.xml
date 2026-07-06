@@ -90,7 +90,8 @@
     <string name="migrate_conflict_message">The dolphin-emu folder at the new location already contains data. Replacing will delete all existing files there, then copy your files from the previous location. This cannot be undone.</string>
     <string name="migrate_conflict_replace">Replace</string>
     <string name="migrate_conflict_keep">Keep Existing</string>
-    <string name="migrate_user_data_success">User data copied and verified. Files removed from previous location.</string>
+    <string name="migrate_user_data_success_title">Migration Complete</string>
+    <string name="migrate_user_data_success_message">Your data has been copied and verified. Dolphin needs to restart to load your settings from the new location.</string>
     <string name="migrate_user_data_failed">Migration failed or verification failed. Files have been kept in the original location.</string>
     <string name="dual_core">Dual Core (speedhack)</string>
     <string name="dual_core_description">Split workload to two CPU cores instead of one. Increases speed.</string>
