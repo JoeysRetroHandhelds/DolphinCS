@@ -3,10 +3,12 @@
 package org.dolphinemu.dolphinemu.dialogs
 
 import android.app.Dialog
+import android.content.DialogInterface
 import android.os.Bundle
 import androidx.fragment.app.DialogFragment
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import org.dolphinemu.dolphinemu.R
+import org.dolphinemu.dolphinemu.ui.main.MainActivity
 import org.dolphinemu.dolphinemu.utils.Analytics
 
 class AnalyticsDialog : DialogFragment() {
@@ -21,6 +23,13 @@ class AnalyticsDialog : DialogFragment() {
                 Analytics.firstAnalyticsAdd(false)
             }
         return dialog.create()
+    }
+
+    override fun onDismiss(dialog: DialogInterface) {
+        super.onDismiss(dialog)
+        // The migration prompt is held back while this dialog is up — check again now instead
+        // of waiting for the next onResume.
+        (activity as? MainActivity)?.checkMigration()
     }
 
     companion object {

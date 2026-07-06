@@ -138,8 +138,10 @@ class MainActivity : AppCompatActivity(), MainView, OnRefreshListener, ThemeProv
         presenter.onResume()
     }
 
-    private fun checkMigration() {
-        // Don't stack on top of the analytics prompt — migration will show on the next launch
+    fun checkMigration() {
+        // Don't stack on top of the analytics prompt. AnalyticsDialog calls this again as soon
+        // as it's dismissed, so migration still shows right away rather than waiting for the
+        // next onResume (e.g. the user backgrounding and returning to the app).
         if (!BooleanSetting.MAIN_ANALYTICS_PERMISSION_ASKED.boolean) return
 
         when (DirectoryInitialization.getMigrationState(this)) {
