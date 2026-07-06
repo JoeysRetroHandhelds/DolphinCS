@@ -36,7 +36,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "org.dolphinemu.dolphinemu"
+        applicationId = "com.joeyos.dolphinemu"
         minSdk = 24
         targetSdk = 36
 
@@ -69,7 +69,7 @@ android {
                 signingConfig = signingConfigs.getByName("release")
             }
 
-            resValue("string", "app_name_suffixed", "Dolphin Emulator")
+            resValue("string", "app_name_suffixed", "DolphinCS")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -81,7 +81,7 @@ android {
         // Signed by debug key disallowing distribution on Play Store.
         // Attaches "debug" suffix to version and package name, allowing installation alongside the release build.
         debug {
-            resValue("string", "app_name_suffixed", "Dolphin Debug")
+            resValue("string", "app_name_suffixed", "DolphinCS Debug")
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
             isJniDebuggable = true
