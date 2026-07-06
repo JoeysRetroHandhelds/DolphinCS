@@ -1,0 +1,157 @@
+name: Sync Upstream Release
+
+on:
+  schedule:
+    - cron: '0 13 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: android-custom-user-data-dir
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream tags and existing sync markers
+        run: |
+          git remote add upstream https://github.com/dolphin-emu/dolphin.git
+          git fetch upstream --tags --quiet
+          git fetch origin --tags --quiet
+
+      - name: Determine latest upstream release tag
+        id: latest
+        run: |
+          # Dolphin tags real releases as YYMM, optionally with a letter suffix for point
+          # releases (e.g. 2606, 2603a). This intentionally excludes dev-build numbers, which
+          # aren't tags at all, and one-off historical tags like "nJoy".
+          LATEST_TAG=$(git for-each-ref --sort=-creatordate --format '%(refname:short)' refs/tags \
+            | grep -E '^[0-9]{4}[a-z]?$' | head -n 1)
+          if [ -z "$LATEST_TAG" ]; then
+            echo "No matching release tag found on upstream"
+            exit 1
+          fi
+          echo "tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+          echo "Latest upstream release tag: $LATEST_TAG"
+
+      - name: Check if already synced
+        id: check
+        run: |
+          if git rev-parse "sync/${{ steps.latest.outputs.tag }}" >/dev/null 2>&1; then
+            echo "already_synced=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "already_synced=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # release-sync is rebuilt from the tip of android-custom-user-data-dir on every run, so
+      # this automation never pushes to (or conflicts with) the branch used for manual testing.
+      - name: Create release-sync branch from latest feature work
+        if: steps.check.outputs.already_synced == 'false'
+        run: git checkout -B release-sync android-custom-user-data-dir
+
+      - name: Merge upstream release tag
+        if: steps.check.outputs.already_synced == 'false'
+        id: merge
+        run: |
+          set +e
+          git merge "${{ steps.latest.outputs.tag }}" --no-edit -m "Merge upstream release ${{ steps.latest.outputs.tag }}"
+          status=$?
+          set -e
+          if [ $status -ne 0 ]; then
+            git merge --abort || true
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report merge conflict
+        if: steps.check.outputs.already_synced == 'false' && steps.merge.outputs.conflict == 'true'
+        run: |
+          gh issue create \
+            --repo "${{ github.repository }}" \
+            --title "Upstream release ${{ steps.latest.outputs.tag }} failed to auto-merge" \
+            --body "Automatic merge of upstream tag \`${{ steps.latest.outputs.tag }}\` into \`release-sync\` (based on \`android-custom-user-data-dir\`) produced conflicts. Merge it manually:
+
+          \`\`\`
+          git fetch upstream --tags
+          git checkout -B release-sync android-custom-user-data-dir
+          git merge ${{ steps.latest.outputs.tag }}
+          \`\`\`"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update submodules
+        if: steps.check.outputs.already_synced == 'false' && steps.merge.outputs.conflict == 'false'
+        run: git submodule update --init --recursive
+
+      - name: Push release-sync branch
+        if: steps.check.outputs.already_synced == 'false' && steps.merge.outputs.conflict == 'false'
+        run: git push origin release-sync --force
+
+      - name: Set up JDK 17
+        if: steps.check.outputs.already_synced == 'false' && steps.merge.outputs.conflict == 'false'
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Set up Android SDK
+        if: steps.check.outputs.already_synced == 'false' && steps.merge.outputs.conflict == 'false'
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK
+        if: steps.check.outputs.already_synced == 'false' && steps.merge.outputs.conflict == 'false'
+        run: sdkmanager "ndk;29.0.14206865"
+
+      - name: Cache CMake build output
+        if: steps.check.outputs.already_synced == 'false' && steps.merge.outputs.conflict == 'false'
+        uses: actions/cache@v4
+        with:
+          path: Source/Android/.cxx
+          key: cxx-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'Source/Core/**/*.cpp', 'Source/Core/**/*.h') }}
+          restore-keys: cxx-${{ runner.os }}-
+
+      - name: Build debug APK
+        if: steps.check.outputs.already_synced == 'false' && steps.merge.outputs.conflict == 'false'
+        working-directory: Source/Android
+        run: ./gradlew assembleDebug --no-daemon
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/29.0.14206865
+
+      - name: Publish release
+        if: steps.check.outputs.already_synced == 'false' && steps.merge.outputs.conflict == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "dolphin-${{ steps.latest.outputs.tag }}"
+          name: "Dolphin ${{ steps.latest.outputs.tag }} + Custom Storage Location"
+          target_commitish: release-sync
+          prerelease: false
+          make_latest: true
+          files: Source/Android/app/build/outputs/apk/debug/app-debug.apk
+          body: |
+            Built from upstream Dolphin release `${{ steps.latest.outputs.tag }}`, merged with the
+            custom user data storage location feature (Scoped Storage / Internal Storage / SD Card).
+
+            This is an unofficial community build, not affiliated with the Dolphin team.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag sync marker
+        if: steps.check.outputs.already_synced == 'false' && steps.merge.outputs.conflict == 'false'
+        run: |
+          git tag "sync/${{ steps.latest.outputs.tag }}"
+          git push origin "sync/${{ steps.latest.outputs.tag }}"
