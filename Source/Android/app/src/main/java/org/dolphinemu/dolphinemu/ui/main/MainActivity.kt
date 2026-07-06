@@ -204,26 +204,32 @@ class MainActivity : AppCompatActivity(), MainView, OnRefreshListener, ThemeProv
                     progressText.text = getString(R.string.migrate_user_data_progress_file, copied, total)
                 }
             }
-        ) { success ->
+        ) { result ->
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 progressDialog.dismiss()
-                if (success) {
-                    DirectoryInitialization.markMigrationOffered(this)
-                    AlertDialog.Builder(this)
-                        .setTitle(R.string.migrate_user_data_success_title)
-                        .setMessage(R.string.migrate_user_data_success_message)
-                        .setPositiveButton(R.string.storage_restart_button) { _, _ ->
-                            val launchIntent = packageManager
-                                .getLaunchIntentForPackage(packageName)
-                                ?.apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK) }
-                            if (launchIntent != null) startActivity(launchIntent)
-                            android.os.Process.killProcess(android.os.Process.myPid())
-                        }
-                        .setCancelable(false)
-                        .show()
-                } else {
-                    Toast.makeText(this, R.string.migrate_user_data_failed, Toast.LENGTH_LONG).show()
+                when (result) {
+                    DirectoryInitialization.MigrationResult.SUCCESS -> {
+                        DirectoryInitialization.markMigrationOffered(this)
+                        AlertDialog.Builder(this)
+                            .setTitle(R.string.migrate_user_data_success_title)
+                            .setMessage(R.string.migrate_user_data_success_message)
+                            .setPositiveButton(R.string.storage_restart_button) { _, _ ->
+                                val launchIntent = packageManager
+                                    .getLaunchIntentForPackage(packageName)
+                                    ?.apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK) }
+                                if (launchIntent != null) startActivity(launchIntent)
+                                android.os.Process.killProcess(android.os.Process.myPid())
+                            }
+                            .setCancelable(false)
+                            .show()
+                    }
+                    DirectoryInitialization.MigrationResult.NOT_ENOUGH_SPACE -> {
+                        Toast.makeText(this, R.string.migrate_user_data_failed_space, Toast.LENGTH_LONG).show()
+                    }
+                    DirectoryInitialization.MigrationResult.FAILED -> {
+                        Toast.makeText(this, R.string.migrate_user_data_failed, Toast.LENGTH_LONG).show()
+                    }
                 }
             }
         }
