@@ -2,13 +2,23 @@
 
 package org.dolphinemu.dolphinemu.ui.main
 
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup.MarginLayoutParams
+import android.widget.LinearLayout
+import android.widget.ProgressBar
+import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.ViewCompat
@@ -44,6 +54,14 @@ class MainActivity : AppCompatActivity(), MainView, OnRefreshListener, ThemeProv
 
     private lateinit var menu: Menu
 
+    private var storagePermissionDialogShown = false
+    private var waitingForStoragePermission = false
+
+    companion object {
+        private const val KEY_STORAGE_DIALOG_SHOWN = "storagePermissionDialogShown"
+        private const val KEY_WAITING_FOR_STORAGE_PERMISSION = "waitingForStoragePermission"
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen().setKeepOnScreenCondition { !DirectoryInitialization.areDolphinDirectoriesReady() }
 
@@ -51,6 +69,9 @@ class MainActivity : AppCompatActivity(), MainView, OnRefreshListener, ThemeProv
         enableEdgeToEdge()
 
         super.onCreate(savedInstanceState)
+
+        storagePermissionDialogShown = savedInstanceState?.getBoolean(KEY_STORAGE_DIALOG_SHOWN) ?: false
+        waitingForStoragePermission = savedInstanceState?.getBoolean(KEY_WAITING_FOR_STORAGE_PERMISSION) ?: false
 
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
@@ -94,13 +115,131 @@ class MainActivity : AppCompatActivity(), MainView, OnRefreshListener, ThemeProv
         ThemeHelper.setCorrectTheme(this)
 
         super.onResume()
+        if (waitingForStoragePermission &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+            Environment.isExternalStorageManager()
+        ) {
+            waitingForStoragePermission = false
+            val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
+                ?.apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK) }
+            if (launchIntent != null) startActivity(launchIntent)
+            android.os.Process.killProcess(android.os.Process.myPid())
+            return
+        }
+        checkStoragePermission()
         if (DirectoryInitialization.shouldStart(this)) {
             DirectoryInitialization.start(this)
             AfterDirectoryInitializationRunner()
                 .runWithLifecycle(this) { setPlatformTabsAndStartGameFileCacheService() }
         }
+        AfterDirectoryInitializationRunner().runWithLifecycle(this) { checkMigration() }
 
         presenter.onResume()
+    }
+
+    private fun checkMigration() {
+        when (DirectoryInitialization.getMigrationState(this)) {
+            DirectoryInitialization.MigrationState.NONE -> return
+            DirectoryInitialization.MigrationState.CLEAN -> {
+                AlertDialog.Builder(this)
+                    .setTitle(R.string.migrate_user_data_title)
+                    .setMessage(R.string.migrate_user_data_message)
+                    .setPositiveButton(R.string.migrate_user_data_yes) { _, _ -> startMigration() }
+                    .setNegativeButton(R.string.migrate_user_data_no) { _, _ ->
+                        DirectoryInitialization.markMigrationOffered(this)
+                    }
+                    .setCancelable(false)
+                    .show()
+            }
+            DirectoryInitialization.MigrationState.CONFLICT -> {
+                AlertDialog.Builder(this)
+                    .setTitle(R.string.migrate_conflict_title)
+                    .setMessage(R.string.migrate_conflict_message)
+                    .setPositiveButton(R.string.migrate_conflict_replace) { _, _ -> startMigration() }
+                    .setNegativeButton(R.string.migrate_conflict_keep) { _, _ ->
+                        DirectoryInitialization.markMigrationOffered(this)
+                    }
+                    .setCancelable(false)
+                    .show()
+            }
+        }
+    }
+
+    private fun startMigration() {
+        val pad = resources.getDimensionPixelSize(R.dimen.spacing_large)
+
+        val progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            isIndeterminate = true
+        }
+        val progressText = TextView(this).apply {
+            setText(R.string.migrate_user_data_progress)
+            setPadding(0, pad / 2, 0, 0)
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad, pad, pad / 2)
+            addView(progressBar)
+            addView(progressText)
+        }
+
+        val progressDialog = AlertDialog.Builder(this)
+            .setTitle(R.string.migrate_user_data_in_progress)
+            .setView(container)
+            .setCancelable(false)
+            .show()
+
+        DirectoryInitialization.copyUserDataToNewLocation(
+            this,
+            onProgress = { copied, total ->
+                runOnUiThread {
+                    progressBar.isIndeterminate = false
+                    progressBar.max = total
+                    progressBar.progress = copied
+                    progressText.text = getString(R.string.migrate_user_data_progress_file, copied, total)
+                }
+            }
+        ) { success ->
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                progressDialog.dismiss()
+                if (success) DirectoryInitialization.markMigrationOffered(this)
+                Toast.makeText(
+                    this,
+                    if (success) R.string.migrate_user_data_success else R.string.migrate_user_data_failed,
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+    }
+
+    private fun checkStoragePermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        if (DirectoryInitialization.getStorageMode(this) == DirectoryInitialization.USER_DIR_MODE_SCOPED) return
+        if (Environment.isExternalStorageManager()) return
+        if (storagePermissionDialogShown) return
+
+        storagePermissionDialogShown = true
+        AlertDialog.Builder(this)
+            .setTitle(R.string.storage_permission_title)
+            .setMessage(R.string.storage_permission_needed)
+            .setPositiveButton(R.string.storage_permission_grant) { _, _ ->
+                waitingForStoragePermission = true
+                val intent = Intent(
+                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    Uri.parse("package:$packageName")
+                )
+                startActivity(intent)
+            }
+            .setNegativeButton(R.string.storage_permission_use_scoped) { _, _ ->
+                DirectoryInitialization.setStorageMode(this, DirectoryInitialization.USER_DIR_MODE_SCOPED)
+            }
+            .show()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean(KEY_STORAGE_DIALOG_SHOWN, storagePermissionDialogShown)
+        outState.putBoolean(KEY_WAITING_FOR_STORAGE_PERMISSION, waitingForStoragePermission)
     }
 
     override fun onStop() {

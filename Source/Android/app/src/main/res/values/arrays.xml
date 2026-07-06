@@ -759,4 +759,24 @@
         <item>1</item>
         <item>2</item>
     </integer-array>
+
+    <string-array name="userDataStorageEntries">
+        <item>Scoped Storage (default)</item>
+        <item>Internal Storage (/sdcard/dolphin-emu)</item>
+        <item>SD Card (/storage/&lt;card&gt;/dolphin-emu)</item>
+    </string-array>
+    <integer-array name="userDataStorageValues">
+        <item>0</item>
+        <item>1</item>
+        <item>2</item>
+    </integer-array>
+
+    <string-array name="userDataStorageEntriesNoSd">
+        <item>Scoped Storage (default)</item>
+        <item>Internal Storage (/sdcard/dolphin-emu)</item>
+    </string-array>
+    <integer-array name="userDataStorageValuesNoSd">
+        <item>0</item>
+        <item>1</item>
+    </integer-array>
 </resources>
