@@ -3,7 +3,7 @@ name: Android Debug Build
 on:
   push:
     branches:
-      - android-custom-user-data-dir
+      - master
 
 permissions:
   contents: write
@@ -61,7 +61,7 @@ jobs:
           body: |
             **Debug build for testing — not for general use.**
 
-            Branch: `android-custom-user-data-dir`
+            Branch: `master`
             Commit: ${{ github.sha }}
 
             ### What's in this build
