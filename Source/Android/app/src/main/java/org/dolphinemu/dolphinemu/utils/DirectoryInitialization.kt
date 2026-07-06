@@ -191,7 +191,7 @@ object DirectoryInitialization {
             .putBoolean(PREF_MIGRATION_OFFERED, true).apply()
     }
 
-    enum class MigrationResult { SUCCESS, NOT_ENOUGH_SPACE, FAILED }
+    enum class MigrationResult { SUCCESS, NOT_ENOUGH_SPACE, SD_CARD_UNAVAILABLE, FAILED }
 
     // Require some headroom on top of the exact byte count copied, since filesystem block
     // overhead means a copy can run out of space slightly before an exact total would suggest.
@@ -213,17 +213,42 @@ object DirectoryInitialization {
 
         thread {
             try {
+                // The SD card can be removed in the window between the dialog appearing and the
+                // user confirming — check it's still there rather than surfacing a raw IOException.
+                val currentMode = getStorageMode(context)
+                if (prevMode == USER_DIR_MODE_SDCARD || currentMode == USER_DIR_MODE_SDCARD) {
+                    val sdRoot = getSdCardRoot(context)
+                    if (sdRoot == null || !isVolumeMounted(sdRoot)) {
+                        Log.error("[DirectoryInitialization] Migration aborted — SD card not available")
+                        onComplete(MigrationResult.SD_CARD_UNAVAILABLE)
+                        return@thread
+                    }
+                }
+
+                // Source could have been emptied or removed in that same window
+                if (!source.exists() || source.listFiles()?.isEmpty() != false) {
+                    Log.error("[DirectoryInitialization] Migration aborted — source directory missing or empty")
+                    onComplete(MigrationResult.FAILED)
+                    return@thread
+                }
+
                 val files = source.walk().filter { it.isFile }.toList()
                 val requiredBytes = files.sumOf { it.length() }
 
                 // dest may not exist yet (clean migration) — walk up to the nearest existing
-                // ancestor to find how much space is actually available on that volume.
+                // ancestor to find its writability and how much space is available on that volume.
                 var spaceProbe = dest
                 while (!spaceProbe.exists() && spaceProbe.parentFile != null) {
                     spaceProbe = spaceProbe.parentFile!!
                 }
-                val availableBytes = spaceProbe.usableSpace
 
+                if (!spaceProbe.canWrite()) {
+                    Log.error("[DirectoryInitialization] Migration aborted — destination is not writable")
+                    onComplete(MigrationResult.FAILED)
+                    return@thread
+                }
+
+                val availableBytes = spaceProbe.usableSpace
                 if (availableBytes < requiredBytes + MIGRATION_SPACE_MARGIN_BYTES) {
                     Log.error(
                         "[DirectoryInitialization] Migration aborted — not enough free space " +
@@ -481,6 +506,14 @@ object DirectoryInitialization {
         var sdScoped = dirs.getOrNull(1) ?: return null
         repeat(4) { sdScoped = sdScoped.parentFile ?: return null }
         return sdScoped
+    }
+
+    private fun isVolumeMounted(root: File): Boolean {
+        return try {
+            Environment.getExternalStorageState(root) == Environment.MEDIA_MOUNTED
+        } catch (e: Exception) {
+            false
+        }
     }
 
     @JvmStatic
