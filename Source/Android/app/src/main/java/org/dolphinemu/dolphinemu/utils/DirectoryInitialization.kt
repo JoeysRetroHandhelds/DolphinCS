@@ -191,31 +191,57 @@ object DirectoryInitialization {
             .putBoolean(PREF_MIGRATION_OFFERED, true).apply()
     }
 
+    enum class MigrationResult { SUCCESS, NOT_ENOUGH_SPACE, FAILED }
+
+    // Require some headroom on top of the exact byte count copied, since filesystem block
+    // overhead means a copy can run out of space slightly before an exact total would suggest.
+    private const val MIGRATION_SPACE_MARGIN_BYTES = 50L * 1024 * 1024
+
     @JvmStatic
     fun copyUserDataToNewLocation(
         context: Context,
         onProgress: (copied: Int, total: Int) -> Unit,
-        onComplete: (Boolean) -> Unit
+        onComplete: (MigrationResult) -> Unit
     ) {
-        if (!areDirectoriesAvailable) { onComplete(false); return }
+        if (!areDirectoriesAvailable) { onComplete(MigrationResult.FAILED); return }
 
         val prefs = PreferenceManager.getDefaultSharedPreferences(context)
         val prevMode = prefs.getInt(PREF_PREVIOUS_USER_DIR_MODE, -1)
-        val source = getPathForMode(context, prevMode) ?: run { onComplete(false); return }
+        val source = getPathForMode(context, prevMode) ?: run { onComplete(MigrationResult.FAILED); return }
         val dest = File(userPath)
-        if (source.absolutePath == dest.absolutePath) { onComplete(true); return }
+        if (source.absolutePath == dest.absolutePath) { onComplete(MigrationResult.SUCCESS); return }
 
         thread {
             try {
+                val files = source.walk().filter { it.isFile }.toList()
+                val requiredBytes = files.sumOf { it.length() }
+
+                // dest may not exist yet (clean migration) — walk up to the nearest existing
+                // ancestor to find how much space is actually available on that volume.
+                var spaceProbe = dest
+                while (!spaceProbe.exists() && spaceProbe.parentFile != null) {
+                    spaceProbe = spaceProbe.parentFile!!
+                }
+                val availableBytes = spaceProbe.usableSpace
+
+                if (availableBytes < requiredBytes + MIGRATION_SPACE_MARGIN_BYTES) {
+                    Log.error(
+                        "[DirectoryInitialization] Migration aborted — not enough free space " +
+                            "(need ~${requiredBytes / (1024 * 1024)}MB + margin, " +
+                            "have ~${availableBytes / (1024 * 1024)}MB available)"
+                    )
+                    onComplete(MigrationResult.NOT_ENOUGH_SPACE)
+                    return@thread
+                }
+
                 // Clear destination first so no stale files remain after copy
                 val clearFailed = dest.listFiles()?.any { !it.deleteRecursively() } == true
                 if (clearFailed) {
                     Log.error("[DirectoryInitialization] Migration aborted — could not clear destination")
-                    onComplete(false)
+                    onComplete(MigrationResult.FAILED)
                     return@thread
                 }
 
-                val files = source.walk().filter { it.isFile }.toList()
                 val total = files.size
                 onProgress(0, total)
 
@@ -238,14 +264,14 @@ object DirectoryInitialization {
                     } else {
                         source.listFiles()?.forEach { it.deleteRecursively() }
                     }
-                    onComplete(true)
+                    onComplete(MigrationResult.SUCCESS)
                 } else {
                     Log.error("[DirectoryInitialization] Migration verification failed — source kept")
-                    onComplete(false)
+                    onComplete(MigrationResult.FAILED)
                 }
             } catch (e: Exception) {
                 Log.error("[DirectoryInitialization] Migration failed: ${e.message}")
-                onComplete(false)
+                onComplete(MigrationResult.FAILED)
             }
         }
     }
