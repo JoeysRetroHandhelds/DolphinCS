@@ -29,6 +29,7 @@ import com.google.android.material.tabs.TabLayout
 import org.dolphinemu.dolphinemu.R
 import org.dolphinemu.dolphinemu.adapters.PlatformPagerAdapter
 import org.dolphinemu.dolphinemu.databinding.ActivityMainBinding
+import org.dolphinemu.dolphinemu.features.settings.model.BooleanSetting
 import org.dolphinemu.dolphinemu.features.settings.model.IntSetting
 import org.dolphinemu.dolphinemu.features.settings.model.NativeConfig
 import org.dolphinemu.dolphinemu.features.settings.ui.MenuTag
@@ -138,6 +139,9 @@ class MainActivity : AppCompatActivity(), MainView, OnRefreshListener, ThemeProv
     }
 
     private fun checkMigration() {
+        // Don't stack on top of the analytics prompt — migration will show on the next launch
+        if (!BooleanSetting.MAIN_ANALYTICS_PERMISSION_ASKED.boolean) return
+
         when (DirectoryInitialization.getMigrationState(this)) {
             DirectoryInitialization.MigrationState.NONE -> return
             DirectoryInitialization.MigrationState.CLEAN -> {

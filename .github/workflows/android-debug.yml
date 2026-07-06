@@ -5,6 +5,9 @@ on:
     branches:
       - android-custom-user-data-dir
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest

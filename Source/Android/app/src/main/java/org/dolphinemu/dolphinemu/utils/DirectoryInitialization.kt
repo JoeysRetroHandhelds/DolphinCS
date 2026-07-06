@@ -6,9 +6,11 @@
 package org.dolphinemu.dolphinemu.utils
 
 import android.content.Context
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.os.storage.StorageManager
+import android.provider.DocumentsContract
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.content.ContextCompat
@@ -88,6 +90,25 @@ object DirectoryInitialization {
         // Record before Initialize() creates default folders, so migration can distinguish
         // a pre-existing user directory from one Dolphin just scaffolded fresh
         userDirectoryWasPreExisting = File(userPath).let { it.exists() && it.listFiles()?.isNotEmpty() == true }
+
+        // If this is a pre-existing folder from a different storage mode (the "Keep Existing"
+        // conflict case), patch any stale paths on disk before anything else touches this data.
+        // GameFileCache silently strips + saves unresolvable ISOPaths on its very first scan,
+        // which otherwise runs before the user ever sees the migration dialog.
+        if (userDirectoryWasPreExisting) {
+            val prefs = PreferenceManager.getDefaultSharedPreferences(context)
+            if (!prefs.getBoolean(PREF_MIGRATION_OFFERED, false)) {
+                val prevMode = prefs.getInt(PREF_PREVIOUS_USER_DIR_MODE, -1)
+                val currentMode = getStorageMode(context)
+                if (prevMode != -1 && prevMode != currentMode) {
+                    getPathForMode(context, prevMode)?.let { source ->
+                        if (source.absolutePath != File(userPath).absolutePath) {
+                            patchStalePaths(context, source)
+                        }
+                    }
+                }
+            }
+        }
 
         extractSysDirectory(context)
         NativeLibrary.Initialize()
@@ -197,6 +218,10 @@ object DirectoryInitialization {
                 }
 
                 if (verifyMigration(source, dest)) {
+                    // The copied Dolphin.ini still has path/URI values pointing at the old
+                    // location — rewrite anything that resolves under the new user directory.
+                    patchStalePaths(context, source)
+
                     // For Internal/SD Card we own the dolphin-emu folder entirely — delete it.
                     // For Scoped, Android manages the directory itself so only empty it.
                     if (prevMode == USER_DIR_MODE_INTERNAL || prevMode == USER_DIR_MODE_SDCARD) {
@@ -222,6 +247,136 @@ object DirectoryInitialization {
             if (!destFile.exists() || destFile.length() != srcFile.length()) return false
         }
         return true
+    }
+
+    // Dolphin.ini keys that store filesystem paths and can end up stale after a storage
+    // location change — either copied verbatim (clean migration) or already present in a
+    // pre-existing folder the user chose to keep. ISOPath0, ISOPath1, ... are handled separately
+    // since they're a numbered array rather than a fixed key.
+    private val TRACKED_STRING_PATHS = mapOf(
+        "Core" to setOf("DefaultISO"),
+        "General" to setOf(
+            "DumpPath", "LoadPath", "ResourcePackPath", "NANDRootPath",
+            "WiiSDCardPath", "WiiSDCardSyncFolder", "WFSPath"
+        ),
+        "GBA" to setOf("BIOS", "GBPlayerRom", "SavesPath")
+    )
+    private val ISO_PATH_KEY = Regex("ISOPath\\d+")
+
+    /**
+     * Rewrites path-like settings in Dolphin.ini that still point at [sourceRoot] (the previous
+     * user directory) so they resolve under the current [userPath] instead. Values that don't
+     * fall under [sourceRoot] are left untouched, since they were deliberately pointed elsewhere.
+     */
+    private fun patchStalePaths(context: Context, sourceRoot: File) {
+        val iniFile = File(userPath, "Config" + File.separator + "Dolphin.ini")
+        if (!iniFile.exists()) return
+
+        val sourceRootAbs = sourceRoot.absolutePath
+        val sourceRootRelative = relativeToVolumeRoot(context, sourceRoot)
+
+        val lines = try {
+            iniFile.readLines()
+        } catch (e: IOException) {
+            Log.error("[DirectoryInitialization] Failed to read Dolphin.ini for path fixup: ${e.message}")
+            return
+        }
+
+        var currentSection = ""
+        var changed = false
+
+        val newLines = lines.map { line ->
+            val trimmed = line.trim()
+            if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+                currentSection = trimmed.substring(1, trimmed.length - 1)
+                return@map line
+            }
+
+            val eq = line.indexOf('=')
+            if (eq == -1) return@map line
+
+            val key = line.substring(0, eq).trim()
+            val value = line.substring(eq + 1).trim()
+            if (value.isEmpty()) return@map line
+
+            val isTracked = (currentSection == "General" && ISO_PATH_KEY.matches(key)) ||
+                TRACKED_STRING_PATHS[currentSection]?.contains(key) == true
+            if (!isTracked) return@map line
+
+            val rewritten = rewriteStalePath(value, sourceRootAbs, sourceRootRelative) ?: return@map line
+            changed = true
+            "$key = $rewritten"
+        }
+
+        if (changed) {
+            try {
+                iniFile.writeText(newLines.joinToString("\n") + "\n")
+            } catch (e: IOException) {
+                Log.error("[DirectoryInitialization] Failed to rewrite stale paths: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Returns [dir]'s path relative to the shared-storage volume it lives on (primary internal
+     * storage or a removable SD card), so it can be compared against a SAF document ID's
+     * volume-relative path. Returns null if [dir] isn't under a recognized volume.
+     */
+    private fun relativeToVolumeRoot(context: Context, dir: File): String? {
+        val sdRoot = getSdCardRoot(context)
+        val externalRoot = Environment.getExternalStorageDirectory()
+
+        val volumeRoot = when {
+            sdRoot != null && dir.absolutePath.startsWith(sdRoot.absolutePath + File.separator) -> sdRoot
+            dir.absolutePath.startsWith(externalRoot.absolutePath + File.separator) -> externalRoot
+            else -> return null
+        }
+
+        return dir.absolutePath.removePrefix(volumeRoot.absolutePath + File.separator)
+    }
+
+    private fun rewriteStalePath(value: String, sourceRootAbs: String, sourceRootRelative: String?): String? {
+        val suffix = if (ContentHandler.isContentUri(value)) {
+            if (sourceRootRelative == null) return null
+
+            val uri = try {
+                Uri.parse(value)
+            } catch (e: Exception) {
+                return null
+            }
+            if (uri.authority != "com.android.externalstorage.documents") return null
+
+            val documentId = try {
+                DocumentsContract.getDocumentId(uri)
+            } catch (e: Exception) {
+                try {
+                    DocumentsContract.getTreeDocumentId(uri)
+                } catch (e2: Exception) {
+                    null
+                }
+            } ?: return null
+
+            val colonIndex = documentId.indexOf(':')
+            if (colonIndex == -1) return null
+            val relativePath = documentId.substring(colonIndex + 1)
+
+            when {
+                relativePath == sourceRootRelative -> ""
+                relativePath.startsWith("$sourceRootRelative/") ->
+                    relativePath.removePrefix("$sourceRootRelative/")
+                else -> return null
+            }
+        } else {
+            when {
+                value == sourceRootAbs -> ""
+                value.startsWith(sourceRootAbs + File.separator) ->
+                    value.removePrefix(sourceRootAbs + File.separator)
+                else -> return null
+            }
+        }
+
+        val newFile = if (suffix.isEmpty()) File(userPath) else File(userPath, suffix)
+        return if (newFile.exists()) newFile.absolutePath else null
     }
 
     private fun hasLegacyStorageAccess(context: Context): Boolean {
