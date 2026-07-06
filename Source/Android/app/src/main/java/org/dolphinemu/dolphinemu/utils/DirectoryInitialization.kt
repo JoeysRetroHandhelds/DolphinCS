@@ -8,6 +8,7 @@ package org.dolphinemu.dolphinemu.utils
 import android.content.Context
 import android.os.Build
 import android.os.Environment
+import android.os.storage.StorageManager
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.content.ContextCompat
@@ -36,6 +37,14 @@ import kotlin.system.exitProcess
  * - Running the native code's init steps (which include things like populating the User directory)
  */
 object DirectoryInitialization {
+    const val PREF_USER_DIR_MODE = "userDirectoryMode"
+    const val USER_DIR_MODE_SCOPED = 0
+    const val USER_DIR_MODE_INTERNAL = 1
+    const val USER_DIR_MODE_SDCARD = 2
+
+    private const val PREF_MIGRATION_OFFERED = "userDataMigrationOffered"
+    private const val PREF_PREVIOUS_USER_DIR_MODE = "previousUserDirMode"
+
     private val directoryState = MutableLiveData(DirectoryInitializationState.NOT_YET_INITIALIZED)
 
     @Volatile
@@ -44,6 +53,7 @@ object DirectoryInitialization {
     private lateinit var userPath: String
     private lateinit var driverPath: String
     private var usingLegacyUserDirectory = false
+    private var userDirectoryWasPreExisting = false
 
     enum class DirectoryInitializationState {
         NOT_YET_INITIALIZED, INITIALIZING, DOLPHIN_DIRECTORIES_INITIALIZED
@@ -75,6 +85,10 @@ object DirectoryInitialization {
             return
         }
 
+        // Record before Initialize() creates default folders, so migration can distinguish
+        // a pre-existing user directory from one Dolphin just scaffolded fresh
+        userDirectoryWasPreExisting = File(userPath).let { it.exists() && it.listFiles()?.isNotEmpty() == true }
+
         extractSysDirectory(context)
         NativeLibrary.Initialize()
 
@@ -91,22 +105,170 @@ object DirectoryInitialization {
     }
 
     @JvmStatic
-    fun getUserDirectoryPath(context: Context?): File? {
-        if (context == null) {
-            return null
+    fun hasSdCard(context: Context): Boolean = getSdCardRoot(context) != null
+
+    @JvmStatic
+    fun getStorageMode(context: Context): Int {
+        return PreferenceManager.getDefaultSharedPreferences(context)
+            .getInt(PREF_USER_DIR_MODE, USER_DIR_MODE_SCOPED)
+    }
+
+    @JvmStatic
+    fun setStorageMode(context: Context, mode: Int) {
+        val current = getStorageMode(context)
+        PreferenceManager.getDefaultSharedPreferences(context).edit()
+            .putInt(PREF_USER_DIR_MODE, mode)
+            .putInt(PREF_PREVIOUS_USER_DIR_MODE, current)
+            .remove(PREF_MIGRATION_OFFERED)
+            .apply()
+    }
+
+    private fun getPathForMode(context: Context, mode: Int): File? = when (mode) {
+        USER_DIR_MODE_INTERNAL -> getLegacyUserDirectoryPath()
+        USER_DIR_MODE_SDCARD   -> getSdCardRoot(context)?.let { File(it, "dolphin-emu") }
+        else                   -> context.getExternalFilesDir(null)
+    }
+
+    enum class MigrationState { NONE, CLEAN, CONFLICT }
+
+    @JvmStatic
+    fun getMigrationState(context: Context): MigrationState {
+        if (!areDirectoriesAvailable) return MigrationState.NONE
+
+        val prefs = PreferenceManager.getDefaultSharedPreferences(context)
+        if (prefs.getBoolean(PREF_MIGRATION_OFFERED, false)) return MigrationState.NONE
+
+        val prevMode = prefs.getInt(PREF_PREVIOUS_USER_DIR_MODE, -1)
+        if (prevMode == -1) return MigrationState.NONE
+
+        val currentMode = getStorageMode(context)
+        if (prevMode == currentMode) return MigrationState.NONE
+
+        val sourceDir = getPathForMode(context, prevMode) ?: return MigrationState.NONE
+        if (!sourceDir.exists() || sourceDir.listFiles()?.isEmpty() != false) return MigrationState.NONE
+
+        val destDir = File(userPath)
+        // If paths are the same the app fell back to scoped due to missing permission — not a real migration
+        if (sourceDir.canonicalPath == destDir.canonicalPath) return MigrationState.NONE
+
+        // Use the pre-init snapshot so Dolphin's own folder scaffolding doesn't look like a conflict
+        return if (userDirectoryWasPreExisting) MigrationState.CONFLICT else MigrationState.CLEAN
+    }
+
+    @JvmStatic
+    fun markMigrationOffered(context: Context) {
+        PreferenceManager.getDefaultSharedPreferences(context).edit()
+            .putBoolean(PREF_MIGRATION_OFFERED, true).apply()
+    }
+
+    @JvmStatic
+    fun copyUserDataToNewLocation(
+        context: Context,
+        onProgress: (copied: Int, total: Int) -> Unit,
+        onComplete: (Boolean) -> Unit
+    ) {
+        if (!areDirectoriesAvailable) { onComplete(false); return }
+
+        val prefs = PreferenceManager.getDefaultSharedPreferences(context)
+        val prevMode = prefs.getInt(PREF_PREVIOUS_USER_DIR_MODE, -1)
+        val source = getPathForMode(context, prevMode) ?: run { onComplete(false); return }
+        val dest = File(userPath)
+        if (source.absolutePath == dest.absolutePath) { onComplete(true); return }
+
+        thread {
+            try {
+                // Clear destination first so no stale files remain after copy
+                val clearFailed = dest.listFiles()?.any { !it.deleteRecursively() } == true
+                if (clearFailed) {
+                    Log.error("[DirectoryInitialization] Migration aborted — could not clear destination")
+                    onComplete(false)
+                    return@thread
+                }
+
+                val files = source.walk().filter { it.isFile }.toList()
+                val total = files.size
+                onProgress(0, total)
+
+                files.forEachIndexed { index, srcFile ->
+                    val destFile = dest.resolve(srcFile.relativeTo(source))
+                    destFile.parentFile?.mkdirs()
+                    srcFile.copyTo(destFile, overwrite = true)
+                    onProgress(index + 1, total)
+                }
+
+                if (verifyMigration(source, dest)) {
+                    source.listFiles()?.forEach { it.deleteRecursively() }
+                    onComplete(true)
+                } else {
+                    Log.error("[DirectoryInitialization] Migration verification failed — source kept")
+                    onComplete(false)
+                }
+            } catch (e: Exception) {
+                Log.error("[DirectoryInitialization] Migration failed: ${e.message}")
+                onComplete(false)
+            }
         }
+    }
 
-        if (Environment.getExternalStorageState() != Environment.MEDIA_MOUNTED) {
-            return null
+    private fun verifyMigration(source: File, dest: File): Boolean {
+        source.walk().filter { it.isFile }.forEach { srcFile ->
+            val destFile = dest.resolve(srcFile.relativeTo(source))
+            if (!destFile.exists() || destFile.length() != srcFile.length()) return false
         }
+        return true
+    }
 
-        usingLegacyUserDirectory =
-            preferLegacyUserDirectory(context) && PermissionsHandler.hasWriteAccess(context)
-
-        return if (usingLegacyUserDirectory) {
-            getLegacyUserDirectoryPath()
+    private fun hasLegacyStorageAccess(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
         } else {
-            context.getExternalFilesDir(null)
+            PermissionsHandler.hasWriteAccess(context)
+        }
+    }
+
+    private fun getSdCardRoot(context: Context): File? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val sm = context.getSystemService(StorageManager::class.java)
+            return sm.storageVolumes
+                .firstOrNull { it.isRemovable && it.state == Environment.MEDIA_MOUNTED }
+                ?.directory
+        }
+        // Pre-R: strip Android/data/<pkg>/files (4 levels) from the scoped SD card path
+        val dirs = ContextCompat.getExternalFilesDirs(context, null)
+        var sdScoped = dirs.getOrNull(1) ?: return null
+        repeat(4) { sdScoped = sdScoped.parentFile ?: return null }
+        return sdScoped
+    }
+
+    @JvmStatic
+    fun getUserDirectoryPath(context: Context?): File? {
+        if (context == null) return null
+        if (Environment.getExternalStorageState() != Environment.MEDIA_MOUNTED) return null
+
+        return when (getStorageMode(context)) {
+            USER_DIR_MODE_INTERNAL -> {
+                if (hasLegacyStorageAccess(context)) {
+                    usingLegacyUserDirectory = true
+                    getLegacyUserDirectoryPath()
+                } else {
+                    usingLegacyUserDirectory = false
+                    context.getExternalFilesDir(null)
+                }
+            }
+            USER_DIR_MODE_SDCARD -> {
+                val sdRoot = getSdCardRoot(context)
+                if (sdRoot != null && hasLegacyStorageAccess(context)) {
+                    usingLegacyUserDirectory = true
+                    File(sdRoot, "dolphin-emu")
+                } else {
+                    usingLegacyUserDirectory = false
+                    context.getExternalFilesDir(null)
+                }
+            }
+            else -> { // USER_DIR_MODE_SCOPED
+                usingLegacyUserDirectory = false
+                context.getExternalFilesDir(null)
+            }
         }
     }
 
@@ -296,33 +458,6 @@ object DirectoryInitialization {
         )
     }
 
-    private fun isExternalFilesDirEmpty(context: Context): Boolean {
-        val dir =
-            context.getExternalFilesDir(null) ?: return false // External storage not available
-        val contents = dir.listFiles()
-        return contents == null || contents.isEmpty()
-    }
-
-    private fun legacyUserDirectoryExists(): Boolean {
-        return try {
-            getLegacyUserDirectoryPath()?.exists() == true
-        } catch (_: SecurityException) {
-            // Most likely we don't have permission to read external storage.
-            // Return true so that external storage permissions will be requested.
-            //
-            // Strangely, we don't seem to trigger this case in practice, even with no
-            // permissions... But this only makes things more convenient for users, so no harm
-            // done.
-            true
-        }
-    }
-
-    private fun preferLegacyUserDirectory(context: Context): Boolean {
-        return PermissionsHandler.isExternalStorageLegacy() && !PermissionsHandler.isWritePermissionDenied() && isExternalFilesDirEmpty(
-            context
-        ) && legacyUserDirectoryExists()
-    }
-
     @JvmStatic
     fun isUsingLegacyUserDirectory(): Boolean {
         return usingLegacyUserDirectory
@@ -335,7 +470,12 @@ object DirectoryInitialization {
             return false
         }
 
-        return preferLegacyUserDirectory(context) && !PermissionsHandler.hasWriteAccess(context)
+        val mode = getStorageMode(context)
+        if (mode == USER_DIR_MODE_SCOPED) return false
+
+        // On Android 11+, MANAGE_EXTERNAL_STORAGE is resolved at launch; we don't block here.
+        // On older Android, block until WRITE_EXTERNAL_STORAGE is granted.
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.R && !PermissionsHandler.hasWriteAccess(context)
     }
 
     private fun checkThemeSettings(context: Context) {

@@ -3,11 +3,14 @@
 package org.dolphinemu.dolphinemu.features.settings.ui
 
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Process
 import android.text.TextUtils
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.collection.ArraySet
 import kotlinx.coroutines.CoroutineScope
@@ -211,6 +214,53 @@ class SettingsFragmentPresenter(
     }
 
     private fun addGeneralSettings(sl: ArrayList<SettingsItem>) {
+        val hasSdCard = DirectoryInitialization.hasSdCard(context)
+        sl.add(
+            SingleChoiceSetting(
+                context,
+                object : AbstractIntSetting {
+                    override val isOverridden: Boolean = false
+                    override val isRuntimeEditable: Boolean = true
+                    override fun delete(settings: Settings): Boolean {
+                        DirectoryInitialization.setStorageMode(
+                            context,
+                            DirectoryInitialization.USER_DIR_MODE_SCOPED
+                        )
+                        showRestartDialog()
+                        return true
+                    }
+                    override val int: Int
+                        get() = DirectoryInitialization.getStorageMode(context)
+                    override fun setInt(settings: Settings, newValue: Int) {
+                        DirectoryInitialization.setStorageMode(context, newValue)
+                        showRestartDialog()
+                    }
+                    private fun showRestartDialog() {
+                        AlertDialog.Builder(context)
+                            .setTitle(R.string.storage_restart_title)
+                            .setMessage(R.string.storage_restart_message)
+                            .setPositiveButton(R.string.storage_restart_button) { _, _ ->
+                                val launchIntent = context.packageManager
+                                    .getLaunchIntentForPackage(context.packageName)
+                                    ?.apply {
+                                        addFlags(
+                                            Intent.FLAG_ACTIVITY_NEW_TASK or
+                                            Intent.FLAG_ACTIVITY_CLEAR_TASK
+                                        )
+                                    }
+                                if (launchIntent != null) context.startActivity(launchIntent)
+                                Process.killProcess(Process.myPid())
+                            }
+                            .setCancelable(false)
+                            .show()
+                    }
+                },
+                R.string.user_data_storage,
+                R.string.user_data_storage_description,
+                if (hasSdCard) R.array.userDataStorageEntries else R.array.userDataStorageEntriesNoSd,
+                if (hasSdCard) R.array.userDataStorageValues else R.array.userDataStorageValuesNoSd
+            )
+        )
         sl.add(
             SwitchSetting(
                 context,
