@@ -202,12 +202,23 @@ class MainActivity : AppCompatActivity(), MainView, OnRefreshListener, ThemeProv
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 progressDialog.dismiss()
-                if (success) DirectoryInitialization.markMigrationOffered(this)
-                Toast.makeText(
-                    this,
-                    if (success) R.string.migrate_user_data_success else R.string.migrate_user_data_failed,
-                    Toast.LENGTH_LONG
-                ).show()
+                if (success) {
+                    DirectoryInitialization.markMigrationOffered(this)
+                    AlertDialog.Builder(this)
+                        .setTitle(R.string.migrate_user_data_success_title)
+                        .setMessage(R.string.migrate_user_data_success_message)
+                        .setPositiveButton(R.string.storage_restart_button) { _, _ ->
+                            val launchIntent = packageManager
+                                .getLaunchIntentForPackage(packageName)
+                                ?.apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK) }
+                            if (launchIntent != null) startActivity(launchIntent)
+                            android.os.Process.killProcess(android.os.Process.myPid())
+                        }
+                        .setCancelable(false)
+                        .show()
+                } else {
+                    Toast.makeText(this, R.string.migrate_user_data_failed, Toast.LENGTH_LONG).show()
+                }
             }
         }
     }
@@ -233,6 +244,7 @@ class MainActivity : AppCompatActivity(), MainView, OnRefreshListener, ThemeProv
             .setNegativeButton(R.string.storage_permission_use_scoped) { _, _ ->
                 DirectoryInitialization.setStorageMode(this, DirectoryInitialization.USER_DIR_MODE_SCOPED)
             }
+            .setCancelable(false)
             .show()
     }
 

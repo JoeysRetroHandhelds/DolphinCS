@@ -197,7 +197,13 @@ object DirectoryInitialization {
                 }
 
                 if (verifyMigration(source, dest)) {
-                    source.listFiles()?.forEach { it.deleteRecursively() }
+                    // For Internal/SD Card we own the dolphin-emu folder entirely — delete it.
+                    // For Scoped, Android manages the directory itself so only empty it.
+                    if (prevMode == USER_DIR_MODE_INTERNAL || prevMode == USER_DIR_MODE_SDCARD) {
+                        source.deleteRecursively()
+                    } else {
+                        source.listFiles()?.forEach { it.deleteRecursively() }
+                    }
                     onComplete(true)
                 } else {
                     Log.error("[DirectoryInitialization] Migration verification failed — source kept")
