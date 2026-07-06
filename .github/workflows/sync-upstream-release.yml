@@ -17,7 +17,7 @@ jobs:
       - name: Checkout feature branch
         uses: actions/checkout@v4
         with:
-          ref: android-custom-user-data-dir
+          ref: master
           fetch-depth: 0
           submodules: recursive
 
@@ -56,11 +56,11 @@ jobs:
             echo "already_synced=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # release-sync is rebuilt from the tip of android-custom-user-data-dir on every run, so
+      # release-sync is rebuilt from the tip of master on every run, so
       # this automation never pushes to (or conflicts with) the branch used for manual testing.
       - name: Create release-sync branch from latest feature work
         if: steps.check.outputs.already_synced == 'false'
-        run: git checkout -B release-sync android-custom-user-data-dir
+        run: git checkout -B release-sync master
 
       - name: Merge upstream release tag
         if: steps.check.outputs.already_synced == 'false'
@@ -83,11 +83,11 @@ jobs:
           gh issue create \
             --repo "${{ github.repository }}" \
             --title "Upstream release ${{ steps.latest.outputs.tag }} failed to auto-merge" \
-            --body "Automatic merge of upstream tag \`${{ steps.latest.outputs.tag }}\` into \`release-sync\` (based on \`android-custom-user-data-dir\`) produced conflicts. Merge it manually:
+            --body "Automatic merge of upstream tag \`${{ steps.latest.outputs.tag }}\` into \`release-sync\` (based on \`master\`) produced conflicts. Merge it manually:
 
           \`\`\`
           git fetch upstream --tags
-          git checkout -B release-sync android-custom-user-data-dir
+          git checkout -B release-sync master
           git merge ${{ steps.latest.outputs.tag }}
           \`\`\`"
         env:
