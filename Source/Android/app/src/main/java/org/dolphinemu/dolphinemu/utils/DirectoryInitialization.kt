@@ -91,11 +91,10 @@ object DirectoryInitialization {
         // a pre-existing user directory from one Dolphin just scaffolded fresh
         userDirectoryWasPreExisting = File(userPath).let { it.exists() && it.listFiles()?.isNotEmpty() == true }
 
-        // If this is a pre-existing folder from a different storage mode (the "Keep Existing"
-        // conflict case), patch any stale paths on disk before anything else touches this data.
-        // GameFileCache silently strips + saves unresolvable ISOPaths on its very first scan,
-        // which otherwise runs before the user ever sees the migration dialog.
-        if (userDirectoryWasPreExisting) {
+        // A storage location change restarts into this directory before the user has decided
+        // (or before the copy has run), so handle both the "Keep Existing" conflict case and the
+        // fresh/empty clean-migration case before anything else reads this directory's config.
+        run {
             val prefs = PreferenceManager.getDefaultSharedPreferences(context)
             if (!prefs.getBoolean(PREF_MIGRATION_OFFERED, false)) {
                 val prevMode = prefs.getInt(PREF_PREVIOUS_USER_DIR_MODE, -1)
@@ -103,7 +102,17 @@ object DirectoryInitialization {
                 if (prevMode != -1 && prevMode != currentMode) {
                     getPathForMode(context, prevMode)?.let { source ->
                         if (source.absolutePath != File(userPath).absolutePath) {
-                            patchStalePaths(context, source)
+                            if (userDirectoryWasPreExisting) {
+                                // Patch ahead of GameFileCache's own startup scan, which
+                                // silently strips unresolvable ISOPaths and saves — otherwise
+                                // that runs before the user even sees the migration dialog.
+                                patchStalePaths(context, source)
+                            } else {
+                                // Destination is empty until the copy runs, so first-run flags
+                                // like the analytics prompt would otherwise reset and re-fire
+                                // on every storage location change.
+                                seedFirstRunFlagsFromSource(source)
+                            }
                         }
                     }
                 }
@@ -262,6 +271,53 @@ object DirectoryInitialization {
         "GBA" to setOf("BIOS", "GBPlayerRom", "SavesPath")
     )
     private val ISO_PATH_KEY = Regex("ISOPath\\d+")
+
+    /**
+     * Copies the analytics prompt's answer (and choice) from the previous user directory's
+     * Dolphin.ini into the new, still-empty one, so the prompt doesn't reappear on every
+     * storage location change while waiting for the real migration copy to run.
+     */
+    private fun seedFirstRunFlagsFromSource(source: File) {
+        val sourceIni = File(source, "Config" + File.separator + "Dolphin.ini")
+        if (!sourceIni.exists()) return
+
+        var permissionAsked = false
+        var analyticsEnabled = "False"
+        var inAnalyticsSection = false
+
+        try {
+            sourceIni.forEachLine { rawLine ->
+                val trimmed = rawLine.trim()
+                if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+                    inAnalyticsSection = trimmed == "[Analytics]"
+                    return@forEachLine
+                }
+                if (!inAnalyticsSection) return@forEachLine
+
+                val eq = rawLine.indexOf('=')
+                if (eq == -1) return@forEachLine
+                when (rawLine.substring(0, eq).trim()) {
+                    "PermissionAsked" -> permissionAsked = rawLine.substring(eq + 1).trim() == "True"
+                    "Enabled" -> analyticsEnabled = rawLine.substring(eq + 1).trim()
+                }
+            }
+        } catch (e: IOException) {
+            Log.error("[DirectoryInitialization] Failed to read source Dolphin.ini for seeding: ${e.message}")
+            return
+        }
+
+        if (!permissionAsked) return
+
+        val destIni = File(userPath, "Config" + File.separator + "Dolphin.ini")
+        if (destIni.exists()) return // Don't clobber anything already scaffolded here
+
+        try {
+            destIni.parentFile?.mkdirs()
+            destIni.writeText("[Analytics]\nPermissionAsked = True\nEnabled = $analyticsEnabled\n")
+        } catch (e: IOException) {
+            Log.error("[DirectoryInitialization] Failed to seed first-run flags: ${e.message}")
+        }
+    }
 
     /**
      * Rewrites path-like settings in Dolphin.ini that still point at [sourceRoot] (the previous
