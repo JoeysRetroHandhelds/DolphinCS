@@ -123,10 +123,36 @@ jobs:
           git merge "${{ needs.check.outputs.tag }}" --no-edit -m "Merge upstream release ${{ needs.check.outputs.tag }}"
           status=$?
           set -e
-          if [ $status -ne 0 ]; then
+          if [ $status -eq 0 ]; then
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Files the fork deliberately owns. Upstream editing them is expected and should never
+          # block a release: we always keep our side (our README, and the upstream policy docs we
+          # removed stay removed). Conflicts anywhere else are real and still fail the run.
+          FORK_OWNED="Readme.md Contributing.md CODE_OF_CONDUCT.md .github/workflows/sync-upstream-release.yml"
+          unresolved=""
+          for f in $(git diff --name-only --diff-filter=U); do
+            case " $FORK_OWNED " in
+              *" $f "*)
+                if git cat-file -e "HEAD:$f" 2>/dev/null; then
+                  git checkout --ours -- "$f" && git add -- "$f"
+                else
+                  git rm --quiet -- "$f"
+                fi
+                echo "Auto-resolved fork-owned file (kept ours): $f"
+                ;;
+              *) unresolved="$unresolved $f" ;;
+            esac
+          done
+
+          if [ -n "$unresolved" ]; then
+            echo "Unresolvable conflicts:$unresolved"
             git merge --abort || true
             echo "conflict=true" >> "$GITHUB_OUTPUT"
           else
+            git commit --no-edit
             echo "conflict=false" >> "$GITHUB_OUTPUT"
           fi
 
