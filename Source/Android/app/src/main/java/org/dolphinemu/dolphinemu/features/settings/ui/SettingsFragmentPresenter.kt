@@ -5,6 +5,8 @@ package org.dolphinemu.dolphinemu.features.settings.ui
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import org.dolphinemu.dolphinemu.utils.DirectoryInitialization
+import org.dolphinemu.dolphinemu.utils.Log
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
