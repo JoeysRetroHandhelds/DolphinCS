@@ -24,18 +24,23 @@ import androidx.fragment.app.DialogFragment
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import org.dolphinemu.dolphinemu.R
 import org.dolphinemu.dolphinemu.databinding.FragmentSettingsBinding
 import org.dolphinemu.dolphinemu.features.settings.model.Settings
 import org.dolphinemu.dolphinemu.features.settings.model.view.SettingsItem
+import org.dolphinemu.dolphinemu.features.settings.ui.viewholder.SettingViewHolder
 import org.dolphinemu.dolphinemu.utils.GpuDriverInstallResult
 import org.dolphinemu.dolphinemu.utils.Log
 import org.dolphinemu.dolphinemu.utils.SerializableHelper.serializable
-import java.util.*
-import kotlin.collections.ArrayList
+import java.util.EnumMap
 
 class SettingsFragment : Fragment(), SettingsFragmentView {
     private lateinit var presenter: SettingsFragmentPresenter
@@ -52,6 +57,11 @@ class SettingsFragment : Fragment(), SettingsFragmentView {
         SettingsActivityResultLaunchers(this) { adapter }
 
     private var oldControllerSettingsWarningHeight = 0
+    private var hasScrolledToSearchResult = false
+    private var highlightedSearchResult: SettingsItem? = null
+    private var highlightedSearchResultPosition = RecyclerView.NO_POSITION
+    private var searchIndexWarmupJob: Job? = null
+    private var searchJob: Job? = null
 
     private var binding: FragmentSettingsBinding? = null
 
@@ -101,9 +111,7 @@ class SettingsFragment : Fragment(), SettingsFragmentView {
     }
 
     override fun onCreateView(
-        inflater: LayoutInflater,
-        container: ViewGroup?,
-        savedInstanceState: Bundle?
+        inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?
     ): View {
         binding = FragmentSettingsBinding.inflate(inflater, container, false)
         return binding!!.root
@@ -111,7 +119,11 @@ class SettingsFragment : Fragment(), SettingsFragmentView {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         if (titles.containsKey(menuTag)) {
-            activityView!!.setToolbarTitle(getString(titles[menuTag]!!))
+            activityView!!.setToolbarState(
+                getString(titles[menuTag]!!),
+                menuTag != MenuTag.SETTINGS,
+                menuTag == MenuTag.SETTINGS
+            )
         }
 
         val manager = LinearLayoutManager(activity)
@@ -126,10 +138,13 @@ class SettingsFragment : Fragment(), SettingsFragmentView {
         setInsets()
 
         val activity = requireActivity() as SettingsActivityView
+        presenter.invalidateSearchIndex()
         presenter.onViewCreated(menuTag, activity.settings)
     }
 
     override fun onDestroyView() {
+        clearSearchResultHighlight()
+        searchJob?.cancel()
         super.onDestroyView()
         binding = null
     }
@@ -148,7 +163,81 @@ class SettingsFragment : Fragment(), SettingsFragmentView {
     }
 
     override fun showSettingsList(settingsList: ArrayList<SettingsItem>) {
-        adapter!!.setSettings(settingsList)
+        val query = activityView?.settingsSearchQuery.orEmpty()
+        val isShowingSearch =
+            menuTag == MenuTag.SETTINGS && activityView?.isSettingsSearchActive == true
+        if (!isShowingSearch) {
+            adapter!!.setSettings(settingsList)
+        }
+        if (menuTag == MenuTag.SETTINGS) {
+            warmUpSearchIndex()
+            if (isShowingSearch) {
+                applySettingsFilter(query)
+            }
+        }
+
+        val position = arguments?.getInt(
+            ARGUMENT_SCROLL_TO_SETTING_POSITION, RecyclerView.NO_POSITION
+        ) ?: RecyclerView.NO_POSITION
+        if (!hasScrolledToSearchResult && position in settingsList.indices) {
+            hasScrolledToSearchResult = true
+            binding?.listSettings?.post {
+                val recyclerView = binding?.listSettings ?: return@post
+                (recyclerView.layoutManager as? LinearLayoutManager)?.scrollToPositionWithOffset(
+                    position, 0
+                )
+                highlightSearchResult(position, settingsList[position])
+            }
+        }
+    }
+
+    fun filterSettings(query: String) {
+        if (!this::presenter.isInitialized || presenter.settings == null) {
+            return
+        }
+
+        applySettingsFilter(query)
+    }
+
+    private fun applySettingsFilter(query: String) {
+        searchJob?.cancel()
+        if (query.isBlank()) {
+            val results = if (activityView?.isSettingsSearchActive == true) {
+                arrayListOf()
+            } else {
+                presenter.getSettingsList()
+            }
+            showSearchResults(query, results)
+            return
+        }
+
+        searchJob = viewLifecycleOwner.lifecycleScope.launch {
+            delay(SEARCH_QUERY_DEBOUNCE_MS)
+            val results = presenter.searchSettings(query)
+            if (activityView?.settingsSearchQuery == query) {
+                showSearchResults(query, results)
+            }
+        }
+    }
+
+    private fun warmUpSearchIndex() {
+        if (searchIndexWarmupJob?.isActive == true) {
+            return
+        }
+
+        searchIndexWarmupJob = viewLifecycleOwner.lifecycleScope.launch {
+            presenter.prepareSearchIndex()
+        }
+    }
+
+    private fun showSearchResults(query: String, results: ArrayList<SettingsItem>) {
+        adapter!!.setSettings(results)
+        binding?.textNoSearchResults?.text =
+            getString(R.string.search_settings_no_results, query.trim())
+        binding?.textNoSearchResults?.visibility =
+            if (query.isNotBlank() && results.isEmpty()) View.VISIBLE else View.GONE
+        binding?.listSettings?.visibility =
+            if (query.isNotBlank() && results.isEmpty()) View.GONE else View.VISIBLE
     }
 
     override fun loadSubMenu(menuKey: MenuTag) {
@@ -158,11 +247,33 @@ class SettingsFragment : Fragment(), SettingsFragmentView {
         }
 
         activityView!!.showSettingsFragment(
-            menuKey,
-            null,
-            true,
-            requireArguments().getString(ARGUMENT_GAME_ID)!!
+            menuKey, null, true, requireArguments().getString(ARGUMENT_GAME_ID)!!
         )
+    }
+
+    override fun loadSearchResult(menuKey: MenuTag, settingPosition: Int, extras: Bundle?) {
+        activityView!!.showSearchResult(
+            menuKey, settingPosition, requireArguments().getString(ARGUMENT_GAME_ID)!!, extras
+        )
+    }
+
+    private fun highlightSearchResult(position: Int, setting: SettingsItem) {
+        val recyclerView = binding?.listSettings ?: return
+        highlightedSearchResult = setting
+        highlightedSearchResultPosition = position
+        recyclerView.post {
+            (recyclerView.findViewHolderForAdapterPosition(position) as? SettingViewHolder)
+                ?.highlightSearchResult()
+        }
+    }
+
+    private fun clearSearchResultHighlight() {
+        val recyclerView = binding?.listSettings
+        (recyclerView?.findViewHolderForAdapterPosition(
+            highlightedSearchResultPosition
+        ) as? SettingViewHolder)?.clearSearchResultHighlight()
+        highlightedSearchResult = null
+        highlightedSearchResultPosition = RecyclerView.NO_POSITION
     }
 
     override fun showDialogFragment(fragment: DialogFragment) {
@@ -176,7 +287,11 @@ class SettingsFragment : Fragment(), SettingsFragmentView {
     override val settings: Settings?
         get() = presenter.settings
 
-    override fun onSettingChanged() {
+    override fun onSettingChanged(setting: SettingsItem?) {
+        if (setting == null || setting === highlightedSearchResult) {
+            clearSearchResultHighlight()
+        }
+        presenter.invalidateSearchIndex()
         activityView!!.onSettingChanged()
     }
 
@@ -191,6 +306,10 @@ class SettingsFragment : Fragment(), SettingsFragmentView {
 
     override fun hasMenuTagActionForValue(menuTag: MenuTag, value: Int): Boolean {
         return activityView!!.hasMenuTagActionForValue(menuTag, value)
+    }
+
+    override fun getMenuTagActionExtras(menuTag: MenuTag, value: Int): Bundle? {
+        return activityView!!.getMenuTagActionExtras(menuTag, value)
     }
 
     override var isMappingAllDevices: Boolean
@@ -222,17 +341,13 @@ class SettingsFragment : Fragment(), SettingsFragmentView {
         }
         val msg = "${presenter.gpuDriver!!.name} ${presenter.gpuDriver!!.driverVersion}"
 
-        MaterialAlertDialogBuilder(requireContext())
-            .setTitle(getString(R.string.gpu_driver_dialog_title))
-            .setMessage(msg)
-            .setNegativeButton(android.R.string.cancel, null)
+        MaterialAlertDialogBuilder(requireContext()).setTitle(getString(R.string.gpu_driver_dialog_title))
+            .setMessage(msg).setNegativeButton(android.R.string.cancel, null)
             .setNeutralButton(R.string.gpu_driver_dialog_system) { _: DialogInterface?, _: Int ->
                 presenter.useSystemDriver()
-            }
-            .setPositiveButton(R.string.gpu_driver_dialog_install) { _: DialogInterface?, _: Int ->
+            }.setPositiveButton(R.string.gpu_driver_dialog_install) { _: DialogInterface?, _: Int ->
                 askForDriverFile()
-            }
-            .show()
+            }.show()
     }
 
     override fun getFragmentLifecycle(): Lifecycle {
@@ -249,16 +364,12 @@ class SettingsFragment : Fragment(), SettingsFragmentView {
 
     override fun onDriverInstallDone(result: GpuDriverInstallResult) {
         val view = binding?.root ?: return
-        Snackbar
-            .make(view, resolveInstallResultString(result), Snackbar.LENGTH_LONG)
-            .show()
+        Snackbar.make(view, resolveInstallResultString(result), Snackbar.LENGTH_LONG).show()
     }
 
     override fun onDriverUninstallDone() {
         Toast.makeText(
-            requireContext(),
-            R.string.gpu_driver_dialog_uninstall_done,
-            Toast.LENGTH_SHORT
+            requireContext(), R.string.gpu_driver_dialog_uninstall_done, Toast.LENGTH_SHORT
         ).show()
     }
 
@@ -275,6 +386,8 @@ class SettingsFragment : Fragment(), SettingsFragmentView {
     companion object {
         private const val ARGUMENT_MENU_TAG = "menu_tag"
         private const val ARGUMENT_GAME_ID = "game_id"
+        const val ARGUMENT_SCROLL_TO_SETTING_POSITION = "scroll_to_setting_position"
+        private const val SEARCH_QUERY_DEBOUNCE_MS = 120L
         private val titles: MutableMap<MenuTag, Int> = EnumMap(MenuTag::class.java)
 
         init {
