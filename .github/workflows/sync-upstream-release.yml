@@ -188,6 +188,11 @@ jobs:
       - name: Set up Android SDK
         if: steps.merge.outputs.conflict == 'false'
         uses: android-actions/setup-android@v3
+        with:
+          # The action's default also installs the legacy 'tools' package, which Google removed
+          # from the SDK repository (sdkmanager: "Failed to find package 'tools'"). Nothing here
+          # uses it: Gradle fetches platforms/build-tools itself and the NDK is installed below.
+          packages: platform-tools
 
       - name: Install NDK
         if: steps.merge.outputs.conflict == 'false'
