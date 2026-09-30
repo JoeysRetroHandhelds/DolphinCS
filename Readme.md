@@ -5,6 +5,8 @@
 DolphinCS is an unofficial fork of [Dolphin](https://github.com/dolphin-emu/dolphin), the
 GameCube/Wii emulator. It is **not affiliated with the Dolphin Emulator project**.
 
+AI was used for the entire project.
+
 The only thing this fork changes is **where Dolphin stores its user data on Android**. Everything
 else is identical to upstream Dolphin.
 
