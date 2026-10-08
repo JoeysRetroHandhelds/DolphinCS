@@ -16,8 +16,14 @@
 #include "Core/Config/MainSettings.h"
 #include "Core/Config/SYSCONFSettings.h"
 #include "Core/Config/SessionSettings.h"
+#include "Core/Config/WiimoteSettings.h"
 #include "Core/HW/EXI/EXI.h"
+#include "Core/HW/SI/SI.h"
+#include "Core/HW/SI/SI_Device.h"
+#include "Core/HW/Wiimote.h"
 #include "Core/NetPlayProto.h"
+
+#include "InputCommon/GCAdapter.h"
 
 namespace ConfigLoaders
 {
@@ -125,6 +131,69 @@ public:
       // Disable AA as it isn't deterministic across GPUs
       layer->Set(Config::GFX_MSAA, 1);
       layer->Set(Config::GFX_SSAA, false);
+    }
+
+    // FYI: This controller setting logic is fundamentally flawed.
+    // GCPad/Adapter vs. GBA is controlled from the NetPlay host.
+    // GCPad vs. GCAdapter is controlled by each client.
+    // Each slot must match the desired in-game pad type for synchronization,
+    //  but GCAdapter won't be polled on a local slot if GBA is configured there.
+    //
+    // TLDR:
+    // Mix of GBA + GCPad should work.
+    // Mix of GCPad + GCadapter should work.
+    // But a mix of GBA + GCAdapter will not work properly.
+    //
+    // Code elsewhere needs overhauling to fix this properly.
+
+    u8 local_pad = 0;
+    for (int i = 0; i < SerialInterface::MAX_SI_CHANNELS; ++i)
+    {
+      const NetPlay::PlayerId player_id = m_settings.pad_map[i];
+      const auto config_info = Config::GetInfoForSIDevice(i);
+
+      if (player_id == 0)
+      {
+        // This port is not assigned to any player.
+        layer->Set(config_info, SerialInterface::SIDEVICE_NONE);
+        continue;
+      }
+
+      if (m_settings.gba_config[i].enabled)
+      {
+        layer->Set(config_info, SerialInterface::SIDEVICE_GC_GBA_EMULATED);
+      }
+      else
+      {
+        const SerialInterface::SIDevices si_device =
+            Config::Get(Config::GetInfoForSIDevice(local_pad));
+
+        // Use local controller types for local controllers if they are compatible
+        if (SerialInterface::SIDevice_IsGCController(si_device))
+        {
+          layer->Set(config_info, si_device);
+
+          if (si_device == SerialInterface::SIDEVICE_WIIU_ADAPTER)
+          {
+            // This seems out of place here.
+            GCAdapter::ResetDeviceType(local_pad);
+          }
+        }
+        else if (si_device != SerialInterface::SIDEVICE_AM_BASEBOARD)
+        {
+          layer->Set(config_info, SerialInterface::SIDEVICE_GC_CONTROLLER);
+        }
+      }
+
+      if (player_id == m_settings.local_player_id)
+        ++local_pad;
+    }
+
+    for (int i = 0; i < MAX_WIIMOTES; ++i)
+    {
+      NetPlay::PlayerId player_id = m_settings.wiimote_map[i];
+      layer->Set(Config::GetInfoForWiimoteSource(i),
+                 player_id > 0 ? WiimoteSource::Emulated : WiimoteSource::None);
     }
 
     if (m_settings.savedata_load)

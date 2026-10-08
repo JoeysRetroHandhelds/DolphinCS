@@ -30,9 +30,10 @@
 #endif
 
 #include "Common/Config/Config.h"
-#include "Common/HttpRequest.h"
 #include "Common/Logging/Log.h"
 #include "Common/TraversalClient.h"
+#include "Core/NetPlayCommon.h"
+#include "Core/NetPlayProto.h"
 
 #include "Core/Boot/Boot.h"
 #include "Core/Config/GraphicsSettings.h"
@@ -130,6 +131,7 @@ void NetPlayDialog::CreateMainLayout()
   m_game_button = new QPushButton;
   m_start_button = new QPushButton(tr("Start"));
   m_buffer_size_box = new QSpinBox;
+  m_buffer_size_box->setMaximum(NetPlay::MAX_TARGET_PAD_BUFFER_SIZE);
   m_buffer_label = new QLabel(tr("Buffer:"));
   m_quit_button = new QPushButton(tr("Quit"));
   m_splitter = new QSplitter(Qt::Horizontal);
@@ -550,17 +552,8 @@ void NetPlayDialog::show(std::string nickname, bool use_traversal)
 
 void NetPlayDialog::ResetExternalIP()
 {
-  m_external_ip_address = Common::Lazy<std::string>([]() -> std::string {
-    Common::HttpRequest request;
-    // ENet does not support IPv6, so IPv4 has to be used
-    request.UseIPv4();
-    Common::HttpRequest::Response response =
-        request.Get("https://ip.dolphin-emu.org/", {{"X-Is-Dolphin", "1"}});
-
-    if (response.has_value())
-      return std::string(response->begin(), response->end());
-    return "";
-  });
+  m_external_ip_address =
+      Common::Lazy<std::string>([]() -> std::string { return NetPlay::GetExternalIPAddress(); });
 }
 
 void NetPlayDialog::UpdateDiscordPresence()
